@@ -45,10 +45,37 @@
 (defvar async-debug nil)
 (defvar async-send-over-pipe t)
 (defvar async-in-child-emacs nil)
-(defvar async-callback nil)
-(defvar async-callback-for-process nil)
-(defvar async-callback-value nil)
-(defvar async-callback-value-set nil)
+
+(defclass async-future ()
+  ((process :initarg :process
+            :type process
+            :documentation "Process actually running the code for this future.")
+   (buffer :initarg :buffer
+           :type buffer
+           :documentation "Buffer associated to this future's process")
+
+   (callback :initarg :callback
+             :type (or null
+                       function)
+             :documentation "Maybe-callback to call when process is done (with the result).
+
+When future came from calling `async-start-process' with a non-emacs process by user,
+this will be called with the process as first argument. User can then access the process buffer.")
+   (callback-is-for-process :initarg :callback-is-for-process
+                            :initform nil
+                            :documentation "When non-nil, the callback should receive this future's process as argument.
+
+It is set as nil unless user calls `async-start-process' a non-emacs process.")
+   (value
+    :initform nil
+    :documentation "The process of this future, the retrieved value of this future or '(error …) if error was thrown remotely")
+   (value-set
+    :initform nil
+    :type boolean
+    :documentation "Whether the value of this future has been set"))
+  "Info for a future from `async-start' or `async-start-process'")
+
+;; TODO ↑ buffer-local variable, create "future" class (incl buffer), assign this value to it
 
 (defun async--purecopy (object)
   "Remove text properties in OBJECT.
@@ -134,11 +161,13 @@ It is intended to be used as follows:
 
 (defalias 'async-inject-environment 'async-inject-variables)
 
-(defun async-handle-result (func result buf)
+(defun async-handle-result (func result future)
+  "Forward the RESULT from running FUTURE to FUNC.
+
+Note: FUNC may be other than FUTURE's callback."
   (if (null func)
-      (progn
-        (set (make-local-variable 'async-callback-value) result)
-        (set (make-local-variable 'async-callback-value-set) t))
+      (setf (oref future value) result
+            (oref future value-set) t)
     (unwind-protect
         (if (and (listp result)
                  (eq 'async-signal (nth 0 result)))
@@ -146,30 +175,33 @@ It is intended to be used as follows:
                     (cdr (nth 1 result)))
           (funcall func result))
       (unless async-debug
-        (kill-buffer buf)))))
+        (kill-buffer (oref future buffer))))))
 
-(defun async-when-done (proc &optional _change)
-  "Process sentinel used to retrieve the value from the child process."
-  (when (eq 'exit (process-status proc))
-    (with-current-buffer (process-buffer proc)
-      (if (= 0 (process-exit-status proc))
-            (if async-callback-for-process
-                (if async-callback
+(defun async-when-done (future process &optional _change)
+  "Process sentinel used to retrieve the value from the child PROCESS.
+
+Currify with `apply-partially' with FUTURE to use as sentinel."
+  (when (eq 'exit (process-status process))
+    (let ((callback (oref future callback)))
+      (with-current-buffer (process-buffer process)
+        (if (= 0 (process-exit-status process))
+            (if (oref future callback-is-for-process)
+                (if-let callback
                     (prog1
-                        (funcall async-callback proc)
+                        (funcall callback process)
                       (unless async-debug
                         (kill-buffer (current-buffer))))
-                  (set (make-local-variable 'async-callback-value) proc)
-                  (set (make-local-variable 'async-callback-value-set) t))
+                  (setf (oref future value) process
+                        (oref future value-set) t))
               (goto-char (point-max))
               (backward-sexp)
-              (async-handle-result async-callback (read (current-buffer))
-                                   (current-buffer)))
-          (set (make-local-variable 'async-callback-value)
-               (list 'error
-                     (format "Async process '%s' failed with exit code %d"
-                             (process-name proc) (process-exit-status proc))))
-          (set (make-local-variable 'async-callback-value-set) t)))))
+              (async-handle-result callback (read (current-buffer))
+                                   future))
+          (setf (oref future value)
+                (list 'error
+                      (format "Async process '%s' failed with exit code %d"
+                              (process-name process) (process-exit-status process)))
+                (oref future value-set) t))))))
 
 (defun async--receive-sexp (&optional stream)
   (let ((sexp (decode-coding-string (base64-decode-string
@@ -195,12 +227,15 @@ It is intended to be used as follows:
     (goto-char (point-min)) (insert ?\")
     (goto-char (point-max)) (insert ?\" ?\n)))
 
-(defun async--transmit-sexp (process sexp)
+(defun async--transmit-sexp (future sexp)
+  "Send SEXP to FUTURE's process.
+
+Creates a temp buffer, then call `process-send-region'."
   (with-temp-buffer
     (if async-debug
         (message "Transmitting sexp {{{%s}}}" (pp-to-string sexp)))
     (async--insert-sexp sexp)
-    (process-send-region process (point-min) (point-max))))
+    (process-send-region (oref future process) (point-min) (point-max))))
 
 (defun async-batch-invoke ()
   "Called from the child Emacs process' command line."
@@ -225,28 +260,29 @@ It is intended to be used as follows:
 
 I.e., if no blocking
 would result from a call to `async-get' on that FUTURE."
-  (and (memq (process-status future) '(exit signal))
-       (let ((buf (process-buffer future)))
-         (if (buffer-live-p buf)
-             (with-current-buffer buf
-               async-callback-value-set)
+  (let ((process (oref future process)))
+    (and (memq (process-status process) '(exit signal))
+         (if (buffer-live-p (oref future buffer))
+             (oref future value-set)
            t))))
 
 (defun async-wait (future)
   "Wait for FUTURE to become ready."
   (while (not (async-ready future))
+    ;; ↓ TODO use `sit-for' instead?
     (sleep-for 0.05)))
 
 (defun async-get (future)
   "Get the value from process FUTURE when it is ready.
 FUTURE is returned by `async-start' or `async-start-process' when
 its FINISH-FUNC is nil."
+  ;; TODO (cl-asssert (not (eq (oref future callback) 'ignore)))
   (and future (async-wait future))
-  (let ((buf (process-buffer future)))
+  (let ((buf (oref future buffer)))
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (async-handle-result
-         #'identity async-callback-value (current-buffer))))))
+         #'identity (oref future value) future)))))
 
 (defun async-message-p (value)
   "Return non-nil of VALUE is an async.el message packet."
@@ -254,12 +290,27 @@ its FINISH-FUNC is nil."
        (plist-get value :async-message)))
 
 (defun async-send (&rest args)
-  "Send the given messages to the asychronous Emacs PROCESS."
-  (let ((args (append args '(:async-message t))))
-    (if async-in-child-emacs
-        (if async-callback
-            (funcall async-callback args))
-      (async--transmit-sexp (car args) (list 'quote (cdr args))))))
+  "Send ARGS sexp to the other side.
+
+If in master process, send it to child process, who will receive it with `async-receive'.
+If in child process, send it to master processs, who will receive it in future's CALLBACK."
+  (let* ((args (append args '(:async-message t)))
+         (first-arg (car args))
+         (maybe-future (and
+                        first-arg
+                        (async-future-p first-arg)
+                        first-arg))
+         (in-child-emacs
+          (and first-arg
+               ;; user would have to be real evil to create an `async-future' in child process
+               (async-future-p first-arg))))
+    (if in-child-emacs
+        (if-let* ((future maybe-future)
+                 (callback
+                  (and (async-future-p first-arg)
+                       (oref future callback))))
+            (funcall callback args))
+      (async--transmit-sexp maybe-future (list 'quote (cdr args))))))
 
 (defun async-receive ()
   "Send the given messages to the asychronous Emacs PROCESS."
@@ -275,13 +326,16 @@ finished.  Set DEFAULT-DIRECTORY to change PROGRAM's current
 working directory."
   (let* ((buf (generate-new-buffer (concat "*" name "*")))
          (proc (let ((process-connection-type nil))
-                 (apply #'start-process name buf program program-args))))
-    (with-current-buffer buf
-      (set (make-local-variable 'async-callback) finish-func)
-      (set-process-sentinel proc #'async-when-done)
-      (unless (string= name "emacs")
-        (set (make-local-variable 'async-callback-for-process) t))
-      proc)))
+                 (apply #'start-process name buf program program-args)))
+         (future
+          (async-future :process proc
+                        :buffer buf
+                        :callback finish-func
+                        :callback-is-for-process (not (string= name "emacs")))))
+    (set-process-sentinel proc (apply-partially
+                                #'async-when-done
+                                future))
+    future))
 
 (defvar async-quiet-switch "-Q"
   "The Emacs parameter to use to call emacs without config.
@@ -340,7 +394,7 @@ returns nil.  It can still be useful, however, as an argument to
   (let* ((sexp start-func)
         ;; Subordinate Emacs will send text encoded in UTF-8.
         (coding-system-for-read 'utf-8-auto)
-        (proc
+        (future
           (async-start-process
            "emacs" (file-truename
                     (expand-file-name invocation-name
@@ -357,8 +411,10 @@ returns nil.  It can still be useful, however, as an argument to
                (async--insert-sexp (list 'quote sexp))
                (buffer-string))))))
     (if async-send-over-pipe
-        (async--transmit-sexp proc (list 'quote sexp)))
-    proc))
+        (async--transmit-sexp
+         future
+         (list 'quote sexp)))
+    future))
 
 (defmacro async-sandbox(func)
   "Evaluate FUNC in a separate Emacs process, synchronously."

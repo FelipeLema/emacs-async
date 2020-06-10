@@ -53,7 +53,7 @@
 (defun async-test-2 ()
   (interactive)
   (message "Starting async-test-2...")
-  (let ((proc (async-start
+  (let ((future (async-start
                ;; What to do in the child process
                (lambda ()
                  (message "This is a test")
@@ -62,7 +62,7 @@
     (message "I'm going to do some work here")
     ;; ....
     (message "Async process done, result should be 222: %s"
-             (async-get proc))))
+             (async-get future))))
 
 (defun async-test-3 ()
   (interactive)
@@ -94,7 +94,7 @@
 (defun async-test-5 ()
   (interactive)
   (message "Starting async-test-5...")
-  (let ((proc
+  (let ((future
          (async-start
           ;; What to do in the child process
           (lambda ()
@@ -114,7 +114,7 @@
                          (plist-get result :hello))
               (message "Async process done, result should be 222: %s"
                        result))))))
-    (async-send proc :goodbye "everyone"))
+    (async-send future :goodbye "everyone"))
   (message "Starting async-test-5...done"))
 
 (defun async-test-6 ()
