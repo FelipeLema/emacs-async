@@ -186,7 +186,7 @@ Currify with `apply-partially' with FUTURE to use as sentinel."
       (with-current-buffer (process-buffer process)
         (if (= 0 (process-exit-status process))
             (if (oref future callback-is-for-process)
-                (if-let callback
+                (if callback
                     (prog1
                         (funcall callback process)
                       (unless async-debug
