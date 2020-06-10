@@ -32,6 +32,7 @@
 ;;; Code:
 
 (eval-when-compile (require 'cl-lib))
+(require 'eieio)
 
 (defgroup async nil
   "Simple asynchronous processing in Emacs"
