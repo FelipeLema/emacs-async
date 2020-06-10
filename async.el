@@ -50,7 +50,6 @@
 (defvar async-callback-value nil)
 (defvar async-callback-value-set nil)
 (defvar async-current-process nil)
-(defvar async--procvar nil)
 
 (defun async--purecopy (object)
   "Remove text properties in OBJECT.
@@ -340,10 +339,10 @@ returned except that it yields no value (since the value is
 passed to FINISH-FUNC).  Call `async-get' on such a future always
 returns nil.  It can still be useful, however, as an argument to
 `async-ready' or `async-wait'."
-  (let ((sexp start-func)
+  (let* ((sexp start-func)
         ;; Subordinate Emacs will send text encoded in UTF-8.
-        (coding-system-for-read 'utf-8-auto))
-    (setq async--procvar
+        (coding-system-for-read 'utf-8-auto)
+        (proc
           (async-start-process
            "emacs" (file-truename
                     (expand-file-name invocation-name
@@ -358,10 +357,10 @@ returns nil.  It can still be useful, however, as an argument to
                "<none>"
              (with-temp-buffer
                (async--insert-sexp (list 'quote sexp))
-               (buffer-string)))))
+               (buffer-string))))))
     (if async-send-over-pipe
-        (async--transmit-sexp async--procvar (list 'quote sexp)))
-    async--procvar))
+        (async--transmit-sexp proc (list 'quote sexp)))
+    proc))
 
 (defmacro async-sandbox(func)
   "Evaluate FUNC in a separate Emacs process, synchronously."
