@@ -49,7 +49,6 @@
 (defvar async-callback-for-process nil)
 (defvar async-callback-value nil)
 (defvar async-callback-value-set nil)
-(defvar async-current-process nil)
 
 (defun async--purecopy (object)
   "Remove text properties in OBJECT.
@@ -153,8 +152,7 @@ It is intended to be used as follows:
   "Process sentinel used to retrieve the value from the child process."
   (when (eq 'exit (process-status proc))
     (with-current-buffer (process-buffer proc)
-      (let ((async-current-process proc))
-        (if (= 0 (process-exit-status proc))
+      (if (= 0 (process-exit-status proc))
             (if async-callback-for-process
                 (if async-callback
                     (prog1
@@ -171,7 +169,7 @@ It is intended to be used as follows:
                (list 'error
                      (format "Async process '%s' failed with exit code %d"
                              (process-name proc) (process-exit-status proc))))
-          (set (make-local-variable 'async-callback-value-set) t))))))
+          (set (make-local-variable 'async-callback-value-set) t)))))
 
 (defun async--receive-sexp (&optional stream)
   (let ((sexp (decode-coding-string (base64-decode-string
