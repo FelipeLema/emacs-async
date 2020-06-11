@@ -45,7 +45,10 @@
 
 (defvar async-debug nil)
 (defvar async-send-over-pipe t)
-(defvar async-in-child-emacs nil)
+(defvar async-in-child-emacs nil
+  "Tell where the functions in the async package are being executed.
+
+This is set in `async-batch-invoke', it is not meant to be modified elsewhere.")
 
 (defclass async-future ()
   ((process :initarg :process
@@ -300,12 +303,8 @@ If in child process, send it to master processs, who will receive it in future's
          (maybe-future (and
                         first-arg
                         (async-future-p first-arg)
-                        first-arg))
-         (in-child-emacs
-          (and first-arg
-               ;; user would have to be real evil to create an `async-future' in child process
-               (async-future-p first-arg))))
-    (if in-child-emacs
+                        first-arg)))
+    (if async-in-child-emacs
         (if-let* ((future maybe-future)
                  (callback
                   (and (async-future-p first-arg)
